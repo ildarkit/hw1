@@ -18,13 +18,13 @@ import logging
 config = {
     "REPORT_SIZE": 1000,
     "REPORT_DIR": "./reports",
-    "LOG_DIR": "./log",
+    "LOG_DIR": "./test",
     "REPORT_TEMPLATE": "./report.html",
     "TS_FILE": "/var/tmp/log_analyzer.ts"
 }
 
 _CONFIG = 'log_analyzer.conf'
-RE_LOG_LINE = r"^.+(?:(?:GET)|(?:POST)) (?P<url>.*) HTTP/1\.1.+(?P<request_time>\d+\.\d{3})$"
+RE_LOG_LINE = r"^.+(?:(?:GET)|(?:POST)) (?P<url>.*) HTTP/1\.[01].+(?P<request_time>\d+\.\d{3})$"
 RE_LOG_NAME = r"^nginx-access-ui\.log-(?P<date>\d{8})"
 PLACEHOLDER = '$table_json'
 FORMAT = ('[%(asctime)s] %(levelname).1s %(message)s', '%Y.%m.%d %H:%M:%S')
@@ -48,32 +48,33 @@ class LogParser:
     def __iter__(self):
         try:
             if self.log.endswith('.gz'):
-                self.f = gzip.open(self.log)
+                self._log = gzip.open(self.log)
             else:
-                self.f = open(self.log)
+                self._log = open(self.log)
         except (IOError, OSError):
-            logging.error('open file error')
+            logging.error('Error opening the file')
         else:
-            logging.info('file {} is open'.format(self.f.name))
+            logging.info('File {} is opened'.format(self._log.name))
         return self
 
     def __next__(self):
-        if hasattr(self, 'f'):
-            line = self.f.readline()
+        if hasattr(self, '_log'):
+            line = self._log.readline()
         else:
             raise StopIteration
         if not line:
-            self.f.close()
-            logging.info('eof. file {} is closed'.format(self.f.name))
+            self.close_file()
+            logging.info('File {} is closed'.format(self._log.name))
             raise StopIteration
         return self._parse_line(line)
 
     def next(self):
         return self.__next__()
 
+    def close_file(self):
+        self._log.close()
+
     def _parse_line(self, line):
-        #if isinstance(line, bytes):  # for python3
-        #    line = line.decode()
         m = self._log_line.search(line)
         res = []
         if m:
@@ -88,19 +89,18 @@ class LogAnalyzer:
         self.time_sum_buf = {}
         self.table = []
         self.all_time = 0.0
+        self.all_count = 0
 
-    def _collect(self):
-        for i, item in enumerate(self.logiterator):
-            if i == 0:
-                logging.info('reading...')
+    def get_data(self):
+        for item in self.logiterator:
             if item:
+                self.all_count += 1
                 if item[0] in self.time_sum_buf:
                     self.time_sum_buf[item[0]].append(float(item[1]))  # list of time_sum
                 else:
                     self.time_sum_buf[item[0]] = [float(item[1])]
                     self.all_time += float(item[1])
-        logging.info('done')
-
+        logging.info('Done')
         # инициализация таблицы
         for key in self.time_sum_buf:
             self.table.append(
@@ -121,10 +121,11 @@ class LogAnalyzer:
         return med
 
     def calc(self):
-        self._collect()
-        logging.info('data analyze...')
+        logging.info('Reading...')
+        self.get_data()
+        logging.info('Data analyze...')
         for d in self.table:
-            d[COUNT_PERC] = (float(d[COUNT]) * 100) / len(self.table)
+            d[COUNT_PERC] = (float(d[COUNT]) * 100) / self.all_count
             d[TIME_PERC] = (d[TIME_SUM] * 100) / self.all_time
             d[TIME_AVG] = d[TIME_SUM] / d[COUNT]
             self.time_sum_buf[d[URL]].sort()
@@ -156,14 +157,18 @@ def open_config(config):
     config = config or _CONFIG
     if os.path.exists(config):
         with open(config) as f:
-            return json.load(f)
+            try:
+                return json.load(f)
+            except ValueError:
+                logging.error('Error reading configuration file')
+                return {}
     else:
         return {}
 
 
 def main():
     arg_parser = argparse.ArgumentParser()
-    arg_parser.add_argument('--config', help='path to config file', default='')
+    arg_parser.add_argument('--config', help='path to config file', default='/usr/local/etc/log_nalyzer.conf')
     args = arg_parser.parse_args()
     conf = open_config(args.config)
     config.update(conf)
@@ -186,7 +191,7 @@ def main():
         data = LogAnalyzer(LogParser(log, RE_LOG_LINE)).calc()
 
         logging.info('Preparation for the report...')
-        data.sort(key=lambda d: d['time_sum'], reverse=True)
+        data.sort(key=lambda d: d[TIME_SUM], reverse=True)
         logging.info('Done')
         try:
             with open(config['REPORT_TEMPLATE']) as template, open(report_path, 'w') as report:
