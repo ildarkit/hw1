@@ -1,16 +1,14 @@
+# -*- coding: utf-8 -*-
 # %load log_analyzer.py
 #!/usr/bin/env python
-# -*- coding: utf-8 -*-
 
 import os
 import re
-import sys
 import time
 import gzip
 import json
 import argparse
 import logging
-import logging.handlers
 
 # log_format ui_short '$remote_addr $remote_user $http_x_real_ip [$time_local] "$request" '
 #                     '$status $body_bytes_sent "$http_referer" '
@@ -20,7 +18,9 @@ import logging.handlers
 config = {
     "REPORT_SIZE": 1000,
     "REPORT_DIR": "./reports",
-    "LOG_DIR": "./log"
+    "LOG_DIR": "./log",
+    "REPORT_TEMPLATE": "./report.html",
+    "TS_FILE": "/var/tmp/log_analyzer.ts"
 }
 
 _CONFIG = 'log_analyzer.conf'
@@ -28,14 +28,22 @@ RE_LOG_LINE = r"^.+(?:(?:GET)|(?:POST)) (?P<url>.*) HTTP/1\.1.+(?P<request_time>
 RE_LOG_NAME = r"^nginx-access-ui\.log-(?P<date>\d{8})"
 PLACEHOLDER = '$table_json'
 FORMAT = ('[%(asctime)s] %(levelname).1s %(message)s', '%Y.%m.%d %H:%M:%S')
+URL = 'url'
+TIME_SUM = 'time_sum'
+COUNT = 'count'
+COUNT_PERC = 'count_perc'
+TIME_PERC = 'time_perc'
+TIME_AVG = 'time_avg'
+TIME_MAX = 'time_max'
+TIME_MED = 'time_med'
+COLUMN = (URL, TIME_SUM, COUNT, COUNT_PERC, TIME_PERC, TIME_AVG, TIME_MAX, TIME_MED)
 
 
 class LogParser:
     """Итератор по лог-файлу"""
-    def __init__(self, log, re_log_line, logger):
+    def __init__(self, log, re_log_line):
         self._log_line = re.compile(re_log_line)
         self.log = log
-        self.logger = logger
 
     def __iter__(self):
         try:
@@ -44,9 +52,9 @@ class LogParser:
             else:
                 self.f = open(self.log)
         except (IOError, OSError):
-            self.logger.exception('open file error')
+            logging.error('open file error')
         else:
-            self.logger.info('file {} is open'.format(self.f.name))
+            logging.info('file {} is open'.format(self.f.name))
         return self
 
     def __next__(self):
@@ -56,13 +64,16 @@ class LogParser:
             raise StopIteration
         if not line:
             self.f.close()
-            self.logger.info('eof. file {} is closed'.format(self.f.name))
+            logging.info('eof. file {} is closed'.format(self.f.name))
             raise StopIteration
         return self._parse_line(line)
 
+    def next(self):
+        return self.__next__()
+
     def _parse_line(self, line):
-        if isinstance(line, bytes):  # for python3
-            line = line.decode()
+        #if isinstance(line, bytes):  # for python3
+        #    line = line.decode()
         m = self._log_line.search(line)
         res = []
         if m:
@@ -72,43 +83,36 @@ class LogParser:
 
 class LogAnalyzer:
 
-    _COLUMN = ('url', 'time_sum', 'count', 'count_perc', 'time_perc', 'time_avg', 'time_max', 'time_med')
-
-    def __init__(self, logiterator, logger):
+    def __init__(self, logiterator):
         self.logiterator = logiterator
         self.time_sum_buf = {}
         self.table = []
         self.all_time = 0.0
-        self.logger = logger
 
     def _collect(self):
         for i, item in enumerate(self.logiterator):
             if i == 0:
-                self.logger.info('reading...')
-            try:
-                if item:
-                    if item[0] in self.time_sum_buf:
-                        self.time_sum_buf[item[0]][0] += float(item[1])       # sum of time_sum
-                        self.time_sum_buf[item[0]][1].append(float(item[1]))  # list of time_sum
-                    else:
-                        self.time_sum_buf[item[0]] = [float(item[1]), [float(item[1])]]
-                        self.all_time += float(item[1])
-            except:
-                self.logger.exception('something went wrong on the {} line of the file reading'.format(i))
-                continue
-        self.logger.info('done')
+                logging.info('reading...')
+            if item:
+                if item[0] in self.time_sum_buf:
+                    self.time_sum_buf[item[0]].append(float(item[1]))  # list of time_sum
+                else:
+                    self.time_sum_buf[item[0]] = [float(item[1])]
+                    self.all_time += float(item[1])
+        logging.info('done')
 
+        # инициализация таблицы
         for key in self.time_sum_buf:
             self.table.append(
                 dict(
-                    zip(self.__class__._COLUMN,
-                        (key, self.time_sum_buf[key][0], len(self.time_sum_buf[key][1]), 0.0, 0.0, 0.0, 0.0, 0.0)
+                    zip(COLUMN,
+                        (key, sum(self.time_sum_buf[key]), len(self.time_sum_buf[key]), 0.0, 0.0, 0.0, 0.0, 0.0)
                         )
                 )
             )
 
     @staticmethod
-    def _median(seq):
+    def median(seq):
         length = len(seq)
         if length % 2:
             med = seq[length // 2]
@@ -118,104 +122,90 @@ class LogAnalyzer:
 
     def calc(self):
         self._collect()
-        self.logger.info('data analyze...')
+        logging.info('data analyze...')
         for d in self.table:
-            d['count_perc'] = (d['count'] * 100) / len(self.table)
-            d['time_perc'] = (d['time_sum'] * 100) / self.all_time
-            d['time_avg'] = d['time_sum'] / d['count']
-            self.time_sum_buf[d['url']][1].sort()
-            d['time_max'] = self.time_sum_buf[d['url']][1][-1]
-            d['time_med'] = self._median(self.time_sum_buf[d['url']][1])
-        self.logger.info('done')
-
+            d[COUNT_PERC] = (float(d[COUNT]) * 100) / len(self.table)
+            d[TIME_PERC] = (d[TIME_SUM] * 100) / self.all_time
+            d[TIME_AVG] = d[TIME_SUM] / d[COUNT]
+            self.time_sum_buf[d[URL]].sort()
+            d[TIME_MAX] = self.time_sum_buf[d[URL]][-1]
+            d[TIME_MED] = self.median(self.time_sum_buf[d[URL]])
+        logging.info('done')
         return self.table
 
 
-class LastLogFile:
-    def __init__(self, re_log):
-        self._log = re.compile(re_log)
-
-    def _find_last_file(self, file_list):
-        max = 0
-        last_file = ''
-        for name in file_list:
-            s = self._log.search(name)
-            if s:
+def get_last_log(path):
+    max = 0
+    log_file = ''
+    re_log = re.compile(RE_LOG_NAME)
+    if os.path.exists(path):
+        for name in os.listdir(path):
+            date = re_log.search(name)
+            if name:
                 try:
-                    cur = int(s.groupdict()['date'])
-                    if max < cur:
-                        max = cur
-                        last_file = name
+                    date = int(date.groupdict()['date'])
+                    if max < date:
+                        max = date
+                        log_file = name
                 except ValueError:
                     continue
-        return last_file, str(max)
-
-    def find(self, log_dir):
-        return self._find_last_file(os.listdir(log_dir))
+    return os.path.abspath(os.path.join(path, log_file)), str(max)
 
 
 def open_config(config):
     config = config or _CONFIG
-    with open(config) as f:
-        return json.load(f)
-
-
-def get_logger(name, file='', format=FORMAT, level=logging.INFO):
-    logger = logging.getLogger(name)
-    logger.setLevel(level)
-    if file:
-        handler = logging.handlers.RotatingFileHandler(file, maxBytes=8192, backupCount=10)
+    if os.path.exists(config):
+        with open(config) as f:
+            return json.load(f)
     else:
-        handler = logging.StreamHandler(stream=sys.stdout)
-    handler.setFormatter(logging.Formatter(*format))
-    logger.addHandler(handler)
-    return logger
+        return {}
 
 
 def main():
     arg_parser = argparse.ArgumentParser()
-    arg_parser.add_argument('--config', help='path to config file')
+    arg_parser.add_argument('--config', help='path to config file', default='')
     args = arg_parser.parse_args()
     conf = open_config(args.config)
-    logger = get_logger(__name__, conf.get('SCRIPT_LOG', ''))
-    logger.info('start logging')
-    log, date = LastLogFile(RE_LOG_NAME).find(conf['LOG_DIR'])
+    config.update(conf)
+    logging.basicConfig(filename=config.get('SCRIPT_LOG', ''), level=logging.INFO,
+                        format='[%(asctime)s] %(levelname)s %(message)s', datefmt='%Y.%m.%d %H:%M:%S')
+    logging.info('Start logging')
+    log, date = get_last_log(config['LOG_DIR'])
+    if log:
+        year, month, day = date[:4], date[4:6], date[6:]
+    else:
+        logging.error('Log file not found')
+        return
 
     report_path = os.path.join(
-        conf['REPORT_DIR'],
-        conf['REPORT_TEMPLATE'] + '-' + date[:3] + '.' + date[3:5] + '.' + date[5:]
+        config['REPORT_DIR'],
+        'report-{}.{}.{}.html'.format(year, month, day)
     )
 
     if not os.path.exists(report_path):
-        data = LogAnalyzer(
-            LogParser(
-                log, RE_LOG_LINE, logger
-            ),
-            logger
-        ).calc()
+        data = LogAnalyzer(LogParser(log, RE_LOG_LINE)).calc()
 
-        logger.info('preparation for the report...')
+        logging.info('Preparation for the report...')
         data.sort(key=lambda d: d['time_sum'], reverse=True)
-        logger.info('done')
+        logging.info('Done')
         try:
-            with open(conf['REPORT_TEMPLATE']) as template, open(report_path, 'w') as report:
-                logger.info('reporting...')
+            with open(config['REPORT_TEMPLATE']) as template, open(report_path, 'w') as report:
+                logging.info('Reporting...')
                 report.write(
                     template.read().replace(
-                        PLACEHOLDER ,data[:conf['REPORT_SIZE']]
+                        PLACEHOLDER, json.dumps(data[:config['REPORT_SIZE']])
                     )
                 )
-                logger.info('the report {} is ready'.format(report.name))
-        except IOError:
-            logger.exception('report error')
-        else:
-            try:
-                with open(conf['TS_FILE'], 'w') as f:
-                    f.write(str(time.time()))
-            except IOError:
-                logger.exception('timestamp not created')
-
-        logger.info('end logging')
+                logging.info('The report {} is ready'.format(report.name))
+        except (IOError, KeyError):
+            logging.error('Report error')
+            return
+        try:
+            with open(config['TS_FILE'], 'w') as f:
+                f.write(str(time.time()))
+        except (IOError, KeyError):
+            logging.error('Timestamp not created')
+        logging.info('End logging')
 
 
 if __name__ == "__main__":
