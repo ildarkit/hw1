@@ -66,7 +66,7 @@ class LogParser:
             self.close_file()
             logging.info('File {} is closed'.format(self._log.name))
             raise StopIteration
-        return self._parse_line(line)
+        return self.parsing(line)
 
     def next(self):
         return self.__next__()
@@ -74,7 +74,7 @@ class LogParser:
     def close_file(self):
         self._log.close()
 
-    def _parse_line(self, line):
+    def parsing(self, line):
         m = self._log_line.search(line)
         res = []
         if m:
