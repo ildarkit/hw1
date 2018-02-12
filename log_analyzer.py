@@ -19,11 +19,9 @@ config = {
     "REPORT_SIZE": 1000,
     "REPORT_DIR": "./reports",
     "LOG_DIR": "./test",
-    "REPORT_TEMPLATE": "./report.html",
-    "TS_FILE": "/var/tmp/log_analyzer.ts"
 }
 
-_CONFIG = 'log_analyzer.conf'
+CONFIG = 'log_analyzer.conf'
 RE_LOG_LINE = r"^.+(?:(?:GET)|(?:POST)) (?P<url>.*) HTTP/1\.[01].+(?P<request_time>\d+\.\d{3})$"
 RE_LOG_NAME = r"^nginx-access-ui\.log-(?P<date>\d{8})"
 PLACEHOLDER = '$table_json'
@@ -36,7 +34,6 @@ TIME_PERC = 'time_perc'
 TIME_AVG = 'time_avg'
 TIME_MAX = 'time_max'
 TIME_MED = 'time_med'
-COLUMN = (URL, TIME_SUM, COUNT, COUNT_PERC, TIME_PERC, TIME_AVG, TIME_MAX, TIME_MED)
 
 
 class LogParser:
@@ -101,15 +98,6 @@ class LogAnalyzer:
                     self.time_sum_buf[item[0]] = [float(item[1])]
                     self.all_time += float(item[1])
         logging.info('Done')
-        # инициализация таблицы
-        for key in self.time_sum_buf:
-            self.table.append(
-                dict(
-                    zip(COLUMN,
-                        (key, sum(self.time_sum_buf[key]), len(self.time_sum_buf[key]), 0.0, 0.0, 0.0, 0.0, 0.0)
-                        )
-                )
-            )
 
     @staticmethod
     def median(seq):
@@ -120,19 +108,25 @@ class LogAnalyzer:
             med = (seq[length // 2 - 1] + seq[length // 2]) / 2.0
         return med
 
+    def count_perc(self, count):
+        return (float(count) * 100) / self.all_count
+
+    def time_perc_sum(self, summ):
+        return (summ * 100) / self.all_time
+
     def calc(self):
         logging.info('Reading...')
         self.get_data()
         logging.info('Data analyze...')
-        for d in self.table:
-            d[COUNT_PERC] = (float(d[COUNT]) * 100) / self.all_count
-            d[TIME_PERC] = (d[TIME_SUM] * 100) / self.all_time
-            d[TIME_AVG] = d[TIME_SUM] / d[COUNT]
-            self.time_sum_buf[d[URL]].sort()
-            d[TIME_MAX] = self.time_sum_buf[d[URL]][-1]
-            d[TIME_MED] = self.median(self.time_sum_buf[d[URL]])
-        logging.info('done')
-        return self.table
+        for url in self.time_sum_buf:
+            count = len(self.time_sum_buf[url])
+            summ = sum(self.time_sum_buf[url])
+            self.time_sum_buf[url].sort()
+            data = {URL: url, COUNT_PERC: self.count_perc(count), TIME_PERC: self.time_perc_sum(summ),
+                    TIME_AVG: summ / count, TIME_MAX: self.time_sum_buf[url][-1],
+                    TIME_MED: self.median(self.time_sum_buf[url]), TIME_SUM: summ, COUNT: count}
+            yield data
+        logging.info('Done')
 
 
 def get_last_log(path):
@@ -142,19 +136,16 @@ def get_last_log(path):
     if os.path.exists(path):
         for name in os.listdir(path):
             date = re_log.search(name)
-            if name:
-                try:
-                    date = int(date.groupdict()['date'])
-                    if max < date:
-                        max = date
-                        log_file = name
-                except ValueError:
-                    continue
+            if date:
+                date = int(date.groupdict()['date'])
+                if max < date:
+                    max = date
+                    log_file = name
     return os.path.abspath(os.path.join(path, log_file)), str(max)
 
 
 def open_config(config):
-    config = config or _CONFIG
+    config = config or CONFIG
     if os.path.exists(config):
         with open(config) as f:
             try:
@@ -188,17 +179,14 @@ def main():
     )
 
     if not os.path.exists(report_path):
-        data = LogAnalyzer(LogParser(log, RE_LOG_LINE)).calc()
-
-        logging.info('Preparation for the report...')
-        data.sort(key=lambda d: d[TIME_SUM], reverse=True)
-        logging.info('Done')
+        data = sorted((item for item in LogAnalyzer(LogParser(log, RE_LOG_LINE)).calc()),
+                      key=lambda d: d[TIME_SUM], reverse=True)[:config['REPORT_SIZE']]
         try:
             with open(config['REPORT_TEMPLATE']) as template, open(report_path, 'w') as report:
                 logging.info('Reporting...')
                 report.write(
                     template.read().replace(
-                        PLACEHOLDER, json.dumps(data[:config['REPORT_SIZE']])
+                        PLACEHOLDER, json.dumps(data)
                     )
                 )
                 logging.info('The report {} is ready'.format(report.name))
