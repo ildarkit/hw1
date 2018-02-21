@@ -4,11 +4,14 @@
 
 import os
 import re
+import sys
 import time
 import gzip
 import json
-import argparse
 import logging
+import argparse
+import traceback
+from collections import namedtuple
 
 # log_format ui_short '$remote_addr $remote_user $http_x_real_ip [$time_local] "$request" '
 #                     '$status $body_bytes_sent "$http_referer" '
@@ -26,21 +29,19 @@ RE_LOG_LINE = r"^.+(?:(?:GET)|(?:POST)) (?P<url>.*) HTTP/1\.[01].+(?P<request_ti
 RE_LOG_NAME = r"^nginx-access-ui\.log-(?P<date>\d{8})"
 PLACEHOLDER = '$table_json'
 FORMAT = ('[%(asctime)s] %(levelname).1s %(message)s', '%Y.%m.%d %H:%M:%S')
-URL = 'url'
-TIME_SUM = 'time_sum'
-COUNT = 'count'
-COUNT_PERC = 'count_perc'
-TIME_PERC = 'time_perc'
-TIME_AVG = 'time_avg'
-TIME_MAX = 'time_max'
-TIME_MED = 'time_med'
+
+
+class ParseError(Exception):
+    pass
 
 
 class LogParser:
     """Итератор по лог-файлу"""
-    def __init__(self, log, re_log_line):
+    def __init__(self, log, re_log_line, error_threshold=0.4):
         self._log_line = re.compile(re_log_line)
         self.log = log
+        self.counters = {'all': 0, 'error': 0}
+        self.error_threshold = error_threshold
 
     def __iter__(self):
         try:
@@ -72,11 +73,20 @@ class LogParser:
         self._log.close()
 
     def parsing(self, line):
+        self.counters['all'] += 1
         m = self._log_line.search(line)
-        res = []
+        result = None
         if m:
-            res = m.groups()
-        return res
+            result = m.groups()
+        else:
+            self.counters['error'] += 1
+            if self.counters['all'] * self.error_threshold <= self.counters['error'] and (
+                    self.counters['all'] >= config['REPORT_SIZE']):
+                self.close_file()
+                raise ParseError('{} entries out of {} failed to parse'.format(
+                    self.counters['error'], self.counters['all']))
+
+        return result
 
 
 class LogAnalyzer:
@@ -122,9 +132,9 @@ class LogAnalyzer:
             count = len(self.time_sum_buf[url])
             summ = sum(self.time_sum_buf[url])
             self.time_sum_buf[url].sort()
-            data = {URL: url, COUNT_PERC: self.count_perc(count), TIME_PERC: self.time_perc_sum(summ),
-                    TIME_AVG: summ / count, TIME_MAX: self.time_sum_buf[url][-1],
-                    TIME_MED: self.median(self.time_sum_buf[url]), TIME_SUM: summ, COUNT: count}
+            data = {'url': url, 'count_perc': self.count_perc(count), 'time_perc': self.time_perc_sum(summ),
+                    'time_avg': summ / count, 'time_max': self.time_sum_buf[url][-1],
+                    'time_med': self.median(self.time_sum_buf[url]), 'time_sum': summ, 'count': count}
             yield data
         logging.info('Done')
 
@@ -132,6 +142,7 @@ class LogAnalyzer:
 def get_last_log(path):
     max = 0
     log_file = ''
+    result = None
     re_log = re.compile(RE_LOG_NAME)
     if os.path.exists(path):
         for name in os.listdir(path):
@@ -141,7 +152,12 @@ def get_last_log(path):
                 if max < date:
                     max = date
                     log_file = name
-    return os.path.abspath(os.path.join(path, log_file)), str(max)
+    LastLog = namedtuple('LastLog', ('path', 'year', 'month', 'day'))
+    if max:
+        date = str(max)
+        result = LastLog(os.path.abspath(os.path.join(path, log_file)),
+                         date[:4], date[4:6], date[6:])
+    return result
 
 
 def open_config(config):
@@ -157,47 +173,62 @@ def open_config(config):
         return {}
 
 
+def exept_handler(ex_type, value, tb):
+    if ex_type is not ParseError:
+        tb_lines = traceback.format_exception(ex_type, value, tb)
+        logging.exception(''.join(tb_lines))
+    else:
+        logging.error(value)
+
+
+def report(data, path):
+    try:
+        if not os.path.exists(os.path.dirname(path)):
+            os.makedirs(os.path.dirname(path))
+        with open(config['REPORT_TEMPLATE']) as template, open(path, 'w') as report:
+            logging.info('Reporting...')
+            report.write(
+                template.read().replace(
+                    PLACEHOLDER, json.dumps(data)
+                )
+            )
+            logging.info('The report {} is ready'.format(report.name))
+    except (IOError, KeyError):
+        logging.error('Report error')
+        return
+    try:
+        with open(config['TS_FILE'], 'w') as f:
+            f.write(str(time.time()))
+    except (IOError, KeyError):
+        logging.error('Timestamp not created')
+
+
 def main():
+    sys.excepthook = exept_handler
     arg_parser = argparse.ArgumentParser()
-    arg_parser.add_argument('--config', help='path to config file', default='/usr/local/etc/log_nalyzer.conf')
+    arg_parser.add_argument('--config', help='path to config file', default='/usr/local/etc/log_analyzer.conf')
     args = arg_parser.parse_args()
     conf = open_config(args.config)
     config.update(conf)
     logging.basicConfig(filename=config.get('SCRIPT_LOG', ''), level=logging.INFO,
                         format='[%(asctime)s] %(levelname)s %(message)s', datefmt='%Y.%m.%d %H:%M:%S')
     logging.info('Start logging')
-    log, date = get_last_log(config['LOG_DIR'])
-    if log:
-        year, month, day = date[:4], date[4:6], date[6:]
-    else:
+    last_log = get_last_log(config['LOG_DIR'])
+    if not last_log:
         logging.error('Log file not found')
         return
 
     report_path = os.path.join(
         config['REPORT_DIR'],
-        'report-{}.{}.{}.html'.format(year, month, day)
+        'report-{}.{}.{}.html'.format(last_log.year, last_log.month, last_log.day)
     )
 
     if not os.path.exists(report_path):
-        data = sorted((item for item in LogAnalyzer(LogParser(log, RE_LOG_LINE)).calc()),
-                      key=lambda d: d[TIME_SUM], reverse=True)[:config['REPORT_SIZE']]
-        try:
-            with open(config['REPORT_TEMPLATE']) as template, open(report_path, 'w') as report:
-                logging.info('Reporting...')
-                report.write(
-                    template.read().replace(
-                        PLACEHOLDER, json.dumps(data)
-                    )
-                )
-                logging.info('The report {} is ready'.format(report.name))
-        except (IOError, KeyError):
-            logging.error('Report error')
-            return
-        try:
-            with open(config['TS_FILE'], 'w') as f:
-                f.write(str(time.time()))
-        except (IOError, KeyError):
-            logging.error('Timestamp not created')
+        parser = LogParser(last_log.path, RE_LOG_LINE)
+        analyzer = LogAnalyzer(parser)
+        data = [item for item in analyzer.calc()]
+        data.sort(key=lambda d: d['time_sum'], reverse=True)
+        report(data[:config['REPORT_SIZE']], report_path)
         logging.info('End logging')
 
 
