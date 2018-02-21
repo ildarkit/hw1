@@ -25,7 +25,7 @@ config = {
 }
 
 CONFIG = 'log_analyzer.conf'
-RE_LOG_LINE = r"^.+(?:(?:GET)|(?:POST)) (?P<url>.*) HTTP/1\.[01].+(?P<request_time>\d+\.\d{3})$"
+RE_LOG_LINE = r"^.+(?:(?:GET)|(?:POST)|(?:HEAD)|(?:PUT)) (?P<url>.*) HTTP/1\.[01].+(?P<request_time>\d+\.\d{3})$"
 RE_LOG_NAME = r"^nginx-access-ui\.log-(?P<date>\d{8})"
 PLACEHOLDER = '$table_json'
 FORMAT = ('[%(asctime)s] %(levelname).1s %(message)s', '%Y.%m.%d %H:%M:%S')
