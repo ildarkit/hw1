@@ -4,11 +4,13 @@
 
 import os
 import re
+import sys
 import time
 import gzip
 import json
 import logging
 import argparse
+import traceback
 from datetime import datetime
 from collections import namedtuple
 from collections import defaultdict
@@ -173,32 +175,36 @@ def report(data, path):
 
 
 def main():
-    arg_parser = argparse.ArgumentParser()
-    arg_parser.add_argument('--config', help='path to config file', default='/usr/local/etc/log_analyzer.conf')
-    args = arg_parser.parse_args()
-    conf = open_config(args.config)
-    config.update(conf)
-    logging.basicConfig(filename=config.get('SCRIPT_LOG', ''), level=logging.INFO,
-                        format='[%(asctime)s] %(levelname)s %(message)s', datefmt='%Y.%m.%d %H:%M:%S')
-    logging.info('Start logging')
-    last_log = get_last_log(config['LOG_DIR'])
-    if not last_log:
-        logging.error('Log file not found')
-        return
+    try:
+        arg_parser = argparse.ArgumentParser()
+        arg_parser.add_argument('--config', help='path to config file', default='/usr/local/etc/log_analyzer.conf')
+        args = arg_parser.parse_args()
+        conf = open_config(args.config)
+        config.update(conf)
+        logging.basicConfig(filename=config.get('SCRIPT_LOG', ''), level=logging.INFO,
+                            format='[%(asctime)s] %(levelname)s %(message)s', datefmt='%Y.%m.%d %H:%M:%S')
+        logging.info('Start logging')
+        last_log = get_last_log(config['LOG_DIR'])
+        if not last_log:
+            logging.error('Log file not found')
+            return
 
-    report_path = os.path.join(
-        config['REPORT_DIR'],
-        'report-{}.html'.format(last_log.date.strftime('%Y.%m.%d'))
-    )
+        report_path = os.path.join(
+            config['REPORT_DIR'],
+            'report-{}.html'.format(last_log.date.strftime('%Y.%m.%d'))
+        )
 
-    if not os.path.exists(report_path):
-        if not os.path.exists(config['REPORT_DIR']):
-            os.makedirs(config['REPORT_DIR'])
-        analyzer = LogAnalyzer(log_generator(last_log.path, log_parser, RE_LOG_LINE))
-        data = [item for item in analyzer.calc()]
-        data.sort(key=lambda d: d['time_sum'], reverse=True)
-        report(data[:config['REPORT_SIZE']], report_path)
-        logging.info('End logging')
+        if not os.path.exists(report_path):
+            if not os.path.exists(config['REPORT_DIR']):
+                os.makedirs(config['REPORT_DIR'])
+            analyzer = LogAnalyzer(log_generator(last_log.path, log_parser, RE_LOG_LINE))
+            data = [item for item in analyzer.calc()]
+            data.sort(key=lambda d: d['time_sum'], reverse=True)
+            report(data[:config['REPORT_SIZE']], report_path)
+            logging.info('End logging')
+    except:
+        tb_lines = traceback.format_exception(*sys.exc_info())
+        logging.exception(''.join(tb_lines))
 
 
 if __name__ == "__main__":
