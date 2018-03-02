@@ -4,14 +4,14 @@
 
 import os
 import re
-import sys
 import time
 import gzip
 import json
 import logging
 import argparse
-import traceback
+from datetime import datetime
 from collections import namedtuple
+from collections import defaultdict
 
 # log_format ui_short '$remote_addr $remote_user $http_x_real_ip [$time_local] "$request" '
 #                     '$status $body_bytes_sent "$http_referer" '
@@ -26,74 +26,54 @@ config = {
 
 CONFIG = 'log_analyzer.conf'
 RE_LOG_LINE = r"^.+(?:(?:GET)|(?:POST)|(?:HEAD)|(?:PUT)) (?P<url>.*) HTTP/1\.[01].+(?P<request_time>\d+\.\d{3})$"
-RE_LOG_NAME = r"^nginx-access-ui\.log-(?P<date>\d{8})"
+RE_LOG_NAME = r"^nginx-access-ui\.log-(?P<date>\d{8})(?:\.(?:(?:gz)|(?:log)|(?:txt)))?$"
 PLACEHOLDER = '$table_json'
 FORMAT = ('[%(asctime)s] %(levelname).1s %(message)s', '%Y.%m.%d %H:%M:%S')
 
 
-class ParseError(Exception):
-    pass
+def log_generator(log, parser=None, re_log_str=None, error_threshold=0.4):
+    """ Генератор, обеспечивающий построковое чтение лог-файла.
+        В качестве аргументов можно передать парсер, строку регулярного выражения
+        и порог ошибок парсинга.
+    """
+    error_threshold = error_threshold
+    counters = {'all': 0, 'error': 0}
+    result = True
+    with gzip.open(log) if log.endswith('.gz') else open(log) as log_file:
+        while result:
+            result = log_file.readline()
+            if result:
+                if parser and re_log_str:
+                    counters['all'] += 1
+                    result = parser(re_log_str, result)
+                    if not result:
+                        counters['error'] += 1
+
+                    if counters['all'] * error_threshold < counters['error'] and (
+                            counters['all'] >= config['REPORT_SIZE']):
+                        # превышен порог ошибок парсинга
+                        logging.error('{} entries out of {} failed to parse'.format(
+                            counters['error'], counters['all']))
+                        break
+
+                yield result
 
 
-class LogParser:
-    """Итератор по лог-файлу"""
-    def __init__(self, log, re_log_line, error_threshold=0.4):
-        self._log_line = re.compile(re_log_line)
-        self.log = log
-        self.counters = {'all': 0, 'error': 0}
-        self.error_threshold = error_threshold
-
-    def __iter__(self):
-        try:
-            if self.log.endswith('.gz'):
-                self._log = gzip.open(self.log)
-            else:
-                self._log = open(self.log)
-        except (IOError, OSError):
-            logging.error('Error opening the file')
-        else:
-            logging.info('File {} is opened'.format(self._log.name))
-        return self
-
-    def __next__(self):
-        if hasattr(self, '_log'):
-            line = self._log.readline()
-        else:
-            raise StopIteration
-        if not line:
-            self.close_file()
-            logging.info('File {} is closed'.format(self._log.name))
-            raise StopIteration
-        return self.parsing(line)
-
-    def next(self):
-        return self.__next__()
-
-    def close_file(self):
-        self._log.close()
-
-    def parsing(self, line):
-        self.counters['all'] += 1
-        m = self._log_line.search(line)
-        result = None
-        if m:
-            result = m.groups()
-        else:
-            self.counters['error'] += 1
-            if self.counters['all'] * self.error_threshold <= self.counters['error'] and (
-                    self.counters['all'] >= config['REPORT_SIZE']):
-                self.close_file()
-                raise ParseError('{} entries out of {} failed to parse'.format(
-                    self.counters['error'], self.counters['all']))
-
-        return result
+def log_parser(re_log_str, line):
+    """Парсер логов"""
+    re_log_line = re.compile(re_log_str)
+    re_result = re_log_line.search(line)
+    if re_result:
+        return re_result.groups()
+    else:
+        return None
 
 
 class LogAnalyzer:
 
     def __init__(self, logiterator):
         self.logiterator = logiterator
-        self.time_sum_buf = {}
+        self.time_sum_buf = defaultdict(list)
         self.table = []
         self.all_time = 0.0
         self.all_count = 0
@@ -102,11 +82,8 @@ class LogAnalyzer:
         for item in self.logiterator:
             if item:
                 self.all_count += 1
-                if item[0] in self.time_sum_buf:
-                    self.time_sum_buf[item[0]].append(float(item[1]))  # list of time_sum
-                else:
-                    self.time_sum_buf[item[0]] = [float(item[1])]
-                    self.all_time += float(item[1])
+                self.time_sum_buf[item[0]].append(float(item[1]))
+                self.all_time += float(item[1])
         logging.info('Done')
 
     @staticmethod
@@ -152,11 +129,11 @@ def get_last_log(path):
                 if max < date:
                     max = date
                     log_file = name
-    LastLog = namedtuple('LastLog', ('path', 'year', 'month', 'day'))
     if max:
+        LastLog = namedtuple('LastLog', ('path', 'date'))
         date = str(max)
-        result = LastLog(os.path.abspath(os.path.join(path, log_file)),
-                         date[:4], date[4:6], date[6:])
+        dt = datetime.strptime(date, '%Y%m%d')
+        result = LastLog(os.path.abspath(os.path.join(path, log_file)), dt)
     return result
 
 
@@ -171,14 +148,6 @@ def open_config(config):
                 return {}
     else:
         return {}
-
-
-def exept_handler(ex_type, value, tb):
-    if ex_type is not ParseError:
-        tb_lines = traceback.format_exception(ex_type, value, tb)
-        logging.exception(''.join(tb_lines))
-    else:
-        logging.error(value)
 
 
 def report(data, path):
@@ -204,7 +173,6 @@ def report(data, path):
 
 
 def main():
-    sys.excepthook = exept_handler
     arg_parser = argparse.ArgumentParser()
     arg_parser.add_argument('--config', help='path to config file', default='/usr/local/etc/log_analyzer.conf')
     args = arg_parser.parse_args()
@@ -220,12 +188,13 @@ def main():
 
     report_path = os.path.join(
         config['REPORT_DIR'],
-        'report-{}.{}.{}.html'.format(last_log.year, last_log.month, last_log.day)
+        'report-{}.html'.format(last_log.date.strftime('%Y.%m.%d'))
     )
 
     if not os.path.exists(report_path):
-        parser = LogParser(last_log.path, RE_LOG_LINE)
-        analyzer = LogAnalyzer(parser)
+        if not os.path.exists(config['REPORT_DIR']):
+            os.makedirs(config['REPORT_DIR'])
+        analyzer = LogAnalyzer(log_generator(last_log.path, log_parser, RE_LOG_LINE))
         data = [item for item in analyzer.calc()]
         data.sort(key=lambda d: d['time_sum'], reverse=True)
         report(data[:config['REPORT_SIZE']], report_path)

@@ -2,9 +2,10 @@ import os
 import unittest
 
 import log_analyzer
-from log_analyzer import LogParser
+from log_analyzer import log_parser
 from log_analyzer import LogAnalyzer
 from log_analyzer import RE_LOG_LINE
+from log_analyzer import log_generator
 
 
 def cases(test_cases):
@@ -21,11 +22,10 @@ def cases(test_cases):
 class LogParserTest(unittest.TestCase):
 
     def setUp(self):
-        self.iterparser = iter(LogParser('./test/nginx-access-ui.log-20170630.log', RE_LOG_LINE))
-        self.parser = LogParser('', RE_LOG_LINE)
+        self.log_generator = log_generator('./test/nginx-access-ui.log-20170630.log', log_parser, RE_LOG_LINE)
 
     def tearDown(self):
-        self.iterparser.close_file()
+        self.log_generator.close()
 
     @cases([('1.200.76.128 f032b48fb33e1e692  - [29/Jun/2017:03:51:09 +0300] "GET /api/1/campaigns/?id=7391355 HTTP/1.1'
              '" 200 704 "-" "-" "-" "1498697469-4102637017-4709-9929537" "-" 0.145',
@@ -49,7 +49,7 @@ class LogParserTest(unittest.TestCase):
              ' HTTP/1.0" 200 615 "-" "-" "-" "1498697471-4102637017-4709-9929573" "-" 0.213',
              ('/api/1/campaigns/?id=7854260', '0.213'))])
     def test_parsing(self, args):
-        self.assertEqual(self.parser.parsing(args[0]), args[1])
+        self.assertEqual(log_parser(RE_LOG_LINE, args[0]), args[1])
 
     @cases([('/api/v2/banner/24824230', '0.143'),
              ('/export/appinstall_raw/2017-06-30/', '0.001'),
@@ -65,7 +65,7 @@ class LogParserTest(unittest.TestCase):
              ('/api/v2/slot/16128/groups', '0.118'),
              ('/export/appinstall_raw/2017-06-29/', '0.003')])
     def test_file_iteration(self, args):
-        item = next(self.iterparser)
+        item = next(self.log_generator)
         self.assertEquals(item, args)
 
 
@@ -73,14 +73,16 @@ class LogAnalyzerTest(unittest.TestCase):
 
     def setUp(self):
         self.analyzer = LogAnalyzer(None)
-        self.iterparser = iter(LogParser('./test/nginx-access-ui.log-20170630.log', RE_LOG_LINE))
-        self.generator = LogAnalyzer(self.iterparser).calc()
-        self.true_analyzer = LogAnalyzer(self.iterparser)
+        self.log_generator1 = log_generator('./test/nginx-access-ui.log-20170630.log', log_parser, RE_LOG_LINE)
+        self.log_generator2 = log_generator('./test/nginx-access-ui.log-20170630.log', log_parser, RE_LOG_LINE)
+        self.calc_generator = LogAnalyzer(self.log_generator1).calc()
+        self.true_analyzer = LogAnalyzer(self.log_generator2)
         self.true_analyzer.get_data()
 
     def tearDown(self):
-        self.iterparser.close_file()
-        self.generator.close()
+        self.log_generator1.close()
+        self.log_generator2.close()
+        self.calc_generator.close()
 
     @cases([([0.9, 1.2, 1.23, 1.4], 1.215),
             ([0.0], 0.0),
@@ -146,7 +148,7 @@ class LogAnalyzerTest(unittest.TestCase):
              'url': '/api/v2/group/7181748/statistic/sites/?date_type=day&date_from=2017-06-29&date_to=2017-06-29',
              'time_med': 0.096, 'time_perc': 0.050061795028237946, 'count_perc': 0.29069767441860467}])
     def test_analyzer(self, kwargs):
-        data = next(self.generator)
+        data = next(self.calc_generator)
         self.assertEqual(data['count'], kwargs['count'])
         self.assertEqual(data['url'], kwargs['url'])
         self.assertAlmostEqual(data['time_avg'], kwargs['time_avg'], delta=0.001)
