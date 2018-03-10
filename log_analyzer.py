@@ -39,26 +39,21 @@ def log_generator(log, parser=None, re_log_str=None, error_threshold=0.4):
         и порог ошибок парсинга.
     """
     error_threshold = error_threshold
-    counters = {'all': 0, 'error': 0}
-    result = True
+    _all = 0
+    errors = 0
     with gzip.open(log) if log.endswith('.gz') else open(log) as log_file:
-        while result:
-            result = log_file.readline()
-            if result:
+        for line in log_file:
+            if line:
                 if parser and re_log_str:
-                    counters['all'] += 1
-                    result = parser(re_log_str, result)
-                    if not result:
-                        counters['error'] += 1
-
-                    if counters['all'] * error_threshold < counters['error'] and (
-                            counters['all'] >= config['REPORT_SIZE']):
-                        # превышен порог ошибок парсинга
-                        logging.error('{} entries out of {} failed to parse'.format(
-                            counters['error'], counters['all']))
-                        break
-
-                yield result
+                    _all += 1
+                    line = parser(re_log_str, line)
+                    if not line:
+                        errors += 1
+                yield line
+    if _all * error_threshold < errors and (
+            _all >= config['REPORT_SIZE']):
+        # превышен порог ошибок парсинга
+        logging.error('{} entries out of {} failed to parse'.format(errors, _all))
 
 
 def log_parser(re_log_str, line):
@@ -167,6 +162,9 @@ def report(data, path):
     except (IOError, KeyError):
         logging.error('Report error')
         return
+
+
+def write_ts():
     try:
         with open(config['TS_FILE'], 'w') as f:
             f.write(str(time.time()))
@@ -175,37 +173,38 @@ def report(data, path):
 
 
 def main():
-    try:
-        arg_parser = argparse.ArgumentParser()
-        arg_parser.add_argument('--config', help='path to config file', default='/usr/local/etc/log_analyzer.conf')
-        args = arg_parser.parse_args()
-        conf = open_config(args.config)
-        config.update(conf)
-        logging.basicConfig(filename=config.get('SCRIPT_LOG', ''), level=logging.INFO,
-                            format='[%(asctime)s] %(levelname)s %(message)s', datefmt='%Y.%m.%d %H:%M:%S')
-        logging.info('Start logging')
-        last_log = get_last_log(config['LOG_DIR'])
-        if not last_log:
-            logging.error('Log file not found')
-            return
+    arg_parser = argparse.ArgumentParser()
+    arg_parser.add_argument('--config', help='path to config file', default='/usr/local/etc/log_analyzer.conf')
+    args = arg_parser.parse_args()
+    conf = open_config(args.config)
+    config.update(conf)
+    logging.basicConfig(filename=config.get('SCRIPT_LOG', ''), level=logging.INFO,
+                        format='[%(asctime)s] %(levelname)s %(message)s', datefmt='%Y.%m.%d %H:%M:%S')
+    logging.info('Start logging')
+    last_log = get_last_log(config['LOG_DIR'])
+    if not last_log:
+        logging.info('Log file not found')
+        return
 
-        report_path = os.path.join(
-            config['REPORT_DIR'],
-            'report-{}.html'.format(last_log.date.strftime('%Y.%m.%d'))
-        )
+    report_path = os.path.join(
+        config['REPORT_DIR'],
+        'report-{}.html'.format(last_log.date.strftime('%Y.%m.%d'))
+    )
 
-        if not os.path.exists(report_path):
-            if not os.path.exists(config['REPORT_DIR']):
-                os.makedirs(config['REPORT_DIR'])
-            analyzer = LogAnalyzer(log_generator(last_log.path, log_parser, RE_LOG_LINE))
-            data = [item for item in analyzer.calc()]
-            data.sort(key=lambda d: d['time_sum'], reverse=True)
-            report(data[:config['REPORT_SIZE']], report_path)
-            logging.info('End logging')
-    except:
-        tb_lines = traceback.format_exception(*sys.exc_info())
-        logging.exception(''.join(tb_lines))
+    if not os.path.exists(report_path):
+        if not os.path.exists(config['REPORT_DIR']):
+            os.makedirs(config['REPORT_DIR'])
+        analyzer = LogAnalyzer(log_generator(last_log.path, log_parser, RE_LOG_LINE))
+        data = [item for item in analyzer.calc()]
+        data = sorted(data, key=lambda d: d['time_sum'], reverse=True)
+        report(data[:config['REPORT_SIZE']], report_path)
+        write_ts()
+        logging.info('End logging')
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except:
+        tb_lines = traceback.format_exception(*sys.exc_info())
+        logging.exception(''.join(tb_lines))
